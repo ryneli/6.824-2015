@@ -8,6 +8,8 @@ import "sync/atomic"
 type WorkerInfo struct {
 	address string
 	// You can add definitions here.
+	jobId   int
+	success bool
 }
 
 
@@ -31,68 +33,121 @@ func (mr *MapReduce) KillWorkers() *list.List {
 
 func (mr *MapReduce) RunMaster() *list.List {
 	// Your code here
-	var iMap, iReduce = 0, 0
+	// map loop
+	mapFunc := func(workerName string, mr *MapReduce, num int) {
+		arg := &DoJobArgs{
+			JobNumber: num,
+			File: mr.file,
+			NumOtherPhase: mr.nReduce,
+			Operation: Map,
+		}
+		var reply DoJobReply
+		mr.Workers[workerName] = &WorkerInfo{
+			address:workerName,
+			jobId: num,
+			success: call(workerName, "Worker.DoJob", arg, &reply),
+		}
+		atomic.AddInt32(&mr.nMapDone, 1)
+		mr.registerChannel <- workerName
+	}
 
-	// scheduler loop
-	for workerName := range mr.registerChannel {
-		DPrintf("RunMaster: %s\n", workerName)
-		if _, ok := mr.Workers[workerName]; !ok {
-			mr.Workers[workerName] = &WorkerInfo{
-				address: workerName,
-			}
-			mr.nWorker++
+	reduceFunc := func(workerName string, mr *MapReduce, num int) {
+		arg := &DoJobArgs{
+			JobNumber: num,
+			File: mr.file,
+			NumOtherPhase: mr.nMap,
+			Operation: Reduce,
 		}
+		var reply DoJobReply
 		
-		// assign map work
-		if iMap != mr.nMap {
-			DPrintf("Map phase\n")
-			go func(workerName string, mr *MapReduce, num int) {
-				arg := &DoJobArgs{
-					JobNumber: num,
-					File: mr.file,
-					NumOtherPhase: mr.nReduce,
-					Operation: Map,
-				}
-				var reply DoJobReply
-				ok := false
-				for !ok {
-					ok = call(workerName, "Worker.DoJob", arg, &reply)
-				}
-				atomic.AddInt32(&mr.nMapDone, 1)
-				// mr.nMapDone++
-				mr.registerChannel <- workerName
-			}(workerName, mr, iMap)
-			iMap++
-		// assign reduce work
-		} else if iReduce != mr.nReduce {
-			DPrintf("Reduce phase\n")
-			go func(workerName string, mr *MapReduce, num int) {
-				arg := &DoJobArgs{
-					JobNumber: num,
-					File: mr.file,
-					NumOtherPhase: mr.nMap,
-					Operation: Reduce,
-				}
-				var reply DoJobReply
-				
-				// wait all map job finish
-				for int(mr.nMapDone) != mr.nMap {}
-				ok := false
-				for !ok {
-					ok = call(workerName, "Worker.DoJob", arg, &reply)
-				}
-				atomic.AddInt32(&mr.nReduceDone, 1)
-				// mr.nReduceDone++
-				mr.registerChannel <- workerName
-			}(workerName, mr, iReduce)
-			iReduce++
-		} else {
-			break
+		mr.Workers[workerName] = &WorkerInfo{
+			address: workerName,
+			jobId: num,
+			success: call(workerName, "Worker.DoJob", arg, &reply),
 		}
+		atomic.AddInt32(&mr.nReduceDone, 1)
+		mr.registerChannel <- workerName
 	}
 	
-	// reduce phase
-	// call(worker, "Worker.DoJob", arg, &reply)
-	
+	freeWorker := make([]string, 0)
+	mapTasks, mapDone := make([]int, mr.nMap), list.New()
+	for i := 0; i < mr.nMap; i++ {
+		mapTasks[i] = i
+	}
+
+	for mapDone.Len() != mr.nMap {
+		var workerName string
+		ready := true
+		if len(freeWorker) > 0 && len(mapTasks) > 0 {
+			workerName, freeWorker = freeWorker[len(freeWorker)-1], freeWorker[:len(freeWorker)-1]
+		} else {
+			workerName = <-mr.registerChannel
+			if workerInfo, ok := mr.Workers[workerName]; ok {
+				delete(mr.Workers, workerName)
+				if workerInfo.success == false {
+					mapTasks = append(mapTasks, workerInfo.jobId)
+					ready = false
+				} else {
+					mapDone.PushBack(workerInfo.jobId)
+				}
+			}
+		}
+		if !ready {
+			if len(freeWorker) > 0 {
+				workerName, freeWorker = freeWorker[len(freeWorker)-1], freeWorker[:len(freeWorker)-1]
+			} else {
+				continue
+			}
+		}
+		
+		if len(mapTasks) > 0 {
+			var jobId int
+			jobId, mapTasks = mapTasks[len(mapTasks)-1], mapTasks[:len(mapTasks)-1]
+			go mapFunc(workerName, mr, jobId)
+		} else {
+			freeWorker = append(freeWorker, workerName)
+		}
+		fmt.Printf("wait mapDone %d; tasks %d; freeworker %d\n", mapDone.Len(), len(mapTasks), len(freeWorker))
+	}
+
+	reduceTasks, reduceDone := make([]int, mr.nReduce), list.New()
+	for i := 0; i < mr.nReduce; i++ {
+		reduceTasks[i] = i
+	}
+	for reduceDone.Len() != mr.nReduce {
+		var workerName string
+		ready := true
+		if len(freeWorker) > 0 && len(reduceTasks) > 0 {
+			workerName, freeWorker = freeWorker[len(freeWorker)-1], freeWorker[:len(freeWorker)-1]
+		} else {
+			workerName = <-mr.registerChannel
+			if workerInfo, ok := mr.Workers[workerName]; ok {
+				delete(mr.Workers, workerName)
+				if workerInfo.success == false {
+					reduceTasks = append(reduceTasks, workerInfo.jobId)
+					ready = false
+				} else {
+					reduceDone.PushBack(workerInfo.jobId)
+				}
+			}
+		}
+
+		if !ready {
+			if len(freeWorker) > 0 {
+				workerName, freeWorker = freeWorker[len(freeWorker)-1], freeWorker[:len(freeWorker)-1]
+			} else {
+				continue
+			}
+		}
+
+		if len(reduceTasks) > 0 {
+			var jobId int
+			jobId, reduceTasks = reduceTasks[len(reduceTasks)-1], reduceTasks[:len(reduceTasks)-1]
+			go reduceFunc(workerName, mr, jobId)
+		} else {
+			fmt.Printf("wait reduceDone %d\n", reduceDone.Len())
+		}
+	}
+
 	return mr.KillWorkers()
 }
