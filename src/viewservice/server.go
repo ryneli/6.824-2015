@@ -18,6 +18,8 @@ type ViewServer struct {
 
 
 	// Your declarations here.
+	views    []View           // [MUTEX] buffered View
+	servers  map[string]time.Time   // [MUTEX] servername : timeout times
 }
 
 //
@@ -26,7 +28,62 @@ type ViewServer struct {
 func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 
 	// Your code here.
-
+	incViewnum := uint(1)
+	if len(vs.views) > 0 {
+		incViewnum = vs.views[0].Viewnum+1
+	}
+	vs.mu.Lock()
+	// 1. Try to remove disconnect server in latest view and update server ping
+	if len(vs.views) > 0 {
+		if _, ok := vs.servers[vs.views[0].Primary]; !ok {
+			vs.views[0].Primary = ""
+		} else if vs.views[0].Primary == args.Me && args.Viewnum == 0 {
+			vs.views[0].Primary = ""
+		}
+		if _, ok := vs.servers[vs.views[0].Backup]; !ok {
+			vs.views[0].Backup = ""
+		}
+		if vs.views[0].Primary == "" && vs.views[0].Backup != "" {
+			// vs.views[0].Primary, vs.views[0].Backup = vs.views[0].Backup, vs.views[0].Primary
+			v := View{Primary:vs.views[0].Backup, Backup:"", Viewnum:incViewnum}
+			vs.views = append([]View{v}, vs.views...)
+		}
+	}
+	vs.servers[args.Me] = time.Now()
+	vs.mu.Unlock()
+	// 2. try to update views
+	// 2.1 initialization
+	if len(vs.views) == 0 || (vs.views[0].Primary != args.Me && vs.views[0].Backup != args.Me) {
+		if len(vs.views) == 0 {
+			vs.views = append([]View{{incViewnum, args.Me, ""}}, vs.views...)
+			// 2.2 set Primary
+		} else if vs.views[0].Primary == "" && vs.views[0].Backup == "" {
+			vs.views = append([]View{{incViewnum, args.Me, ""}}, vs.views...)
+			// 2.3 promote Backup
+		} else if vs.views[0].Primary == "" && vs.views[0].Backup != "" {
+			latest := vs.views[0]
+			vs.views = append([]View{{incViewnum, latest.Backup, args.Me}}, vs.views...)	
+			// 2.4 set Backup
+		} else if vs.views[0].Backup == "" {
+			latest := vs.views[0]
+			vs.views = append([]View{{incViewnum, latest.Primary, args.Me}}, vs.views...)
+		}
+	}
+	fmt.Printf("ping %s %d (%s %s %d)\n", args.Me, args.Viewnum, vs.views[0].Primary, vs.views[0].Backup, vs.views[0].Viewnum)
+	// note: len(views) should be larger than 0
+	// assert.NotEqual(len(vs.views), 0)
+	// 3.  delete all viewnum < args.viewnum if the ping is from Primary
+	if vs.views[0].Primary == args.Me {
+		for vs.views[len(vs.views)-1].Viewnum < args.Viewnum {
+			vs.views = vs.views[:len(vs.views)-1]
+		}
+	}
+	// 4.   set reply.View = View[-1]
+	reply.View = vs.views[len(vs.views)-1]
+	// fmt.Printf("Current servers\n");
+	// for k,v := range vs.servers {
+	// 	fmt.Printf("\t%s : %d\n", k, v)
+	// }
 	return nil
 }
 
@@ -36,7 +93,12 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 
 	// Your code here.
-
+	// 1. set reply.View
+	vs.mu.Lock()
+	if len(vs.views) > 0 {
+		reply.View = vs.views[0]
+	}
+	vs.mu.Unlock()
 	return nil
 }
 
@@ -49,6 +111,14 @@ func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 func (vs *ViewServer) tick() {
 
 	// Your code here.
+	vs.mu.Lock()
+	for k, v := range vs.servers {
+		if time.Since(v) > DeadPings * PingInterval {
+			fmt.Printf("delete %s %d %d\n", k, time.Since(v), DeadPings * PingInterval)
+			delete(vs.servers, k)
+		}
+	}
+	vs.mu.Unlock()
 }
 
 //
@@ -77,7 +147,7 @@ func StartServer(me string) *ViewServer {
 	vs := new(ViewServer)
 	vs.me = me
 	// Your vs.* initializations here.
-
+	vs.servers = make(map[string]time.Time)
 	// tell net/rpc about our RPC server and handlers.
 	rpcs := rpc.NewServer()
 	rpcs.Register(vs)
