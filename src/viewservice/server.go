@@ -18,7 +18,8 @@ type ViewServer struct {
 
 
 	// Your declarations here.
-	views    []View           // [MUTEX] buffered View
+	view       View
+	confirmed  bool                 // Primary server confirmed, view can ONLY be modified when confirmed
 	servers  map[string]time.Time   // [MUTEX] servername : timeout times
 }
 
@@ -28,62 +29,64 @@ type ViewServer struct {
 func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 
 	// Your code here.
-	incViewnum := uint(1)
-	if len(vs.views) > 0 {
-		incViewnum = vs.views[0].Viewnum+1
+	// 1. check confirmed view. ONLY confirmed view can be changed
+	if vs.view.Primary == args.Me && vs.view.Viewnum == args.Viewnum {
+		vs.confirmed = true
+	}
+	// 2. set next Viewnum. Sometimes Primary server will rollback Viewnum, WHY?
+	nextViewnum := vs.view.Viewnum+1
+	if (vs.view.Primary == args.Me) && (args.Viewnum < vs.view.Viewnum) {
+		nextViewnum = args.Viewnum+1
 	}
 	vs.mu.Lock()
-	// 1. Try to remove disconnect server in latest view and update server ping
-	if len(vs.views) > 0 {
-		if _, ok := vs.servers[vs.views[0].Primary]; !ok {
-			vs.views[0].Primary = ""
-		} else if vs.views[0].Primary == args.Me && args.Viewnum == 0 {
-			vs.views[0].Primary = ""
-		}
-		if _, ok := vs.servers[vs.views[0].Backup]; !ok {
-			vs.views[0].Backup = ""
-		}
-		if vs.views[0].Primary == "" && vs.views[0].Backup != "" {
-			// vs.views[0].Primary, vs.views[0].Backup = vs.views[0].Backup, vs.views[0].Primary
-			v := View{Primary:vs.views[0].Backup, Backup:"", Viewnum:incViewnum}
-			vs.views = append([]View{v}, vs.views...)
-		}
-	}
+	// 3. update servers map
 	vs.servers[args.Me] = time.Now()
+	// 4. if confirmed, update view
+	if vs.confirmed {
+		// 4.1.1 reset Primary server if timeout
+		if _,ok := vs.servers[vs.view.Primary]; !ok {
+			vs.view.Primary = ""
+		// 4.1.2 reset Backup server if timeout, ONLY reset Primary or Backup at one time
+		} else if _,ok := vs.servers[vs.view.Backup]; !ok {
+			vs.view.Backup = ""
+		}
+		
+		// 4.2.1 Primary server reset, use Backup server as Primary server
+		if vs.view.Primary == args.Me && args.Viewnum == 0 && vs.view.Backup != "" {
+			vs.view.Primary = vs.view.Backup
+			vs.view.Backup = ""
+			vs.view.Viewnum = nextViewnum
+			vs.confirmed = false
+		// 4.2.2 Primary server timeout, use Backup server as Primary server
+		} else if vs.view.Primary == "" && vs.view.Backup != "" {
+			// fmt.Printf("%s %s %d %d %d\n", vs.view.Primary, args.Me, args.Viewnum, vs.view.Viewnum, nextViewnum)
+			vs.view.Primary = vs.view.Backup
+			vs.view.Backup = ""
+			vs.view.Viewnum = nextViewnum
+			vs.confirmed = false
+		// 4.2.3 Primary server rollback. It is considered as CONFIRMED
+		} else if vs.view.Primary == args.Me && nextViewnum < vs.view.Viewnum {
+			vs.view.Viewnum = nextViewnum
+			vs.confirmed = true // confirm a smaller Viewnum
+		}
+
+		// 4.3.1 use args.Me as Primary server if no Primary
+		if vs.view.Primary == "" {
+			vs.view.Primary = args.Me
+			vs.view.Viewnum = nextViewnum
+			vs.confirmed = false
+		// 4.3.2 use args.Me as Backup server if no Backup
+		} else if vs.view.Primary != args.Me && vs.view.Backup == "" {
+			vs.view.Backup = args.Me
+			vs.view.Viewnum = nextViewnum
+			vs.confirmed = false
+		}
+	}
 	vs.mu.Unlock()
-	// 2. try to update views
-	// 2.1 initialization
-	if len(vs.views) == 0 || (vs.views[0].Primary != args.Me && vs.views[0].Backup != args.Me) {
-		if len(vs.views) == 0 {
-			vs.views = append([]View{{incViewnum, args.Me, ""}}, vs.views...)
-			// 2.2 set Primary
-		} else if vs.views[0].Primary == "" && vs.views[0].Backup == "" {
-			vs.views = append([]View{{incViewnum, args.Me, ""}}, vs.views...)
-			// 2.3 promote Backup
-		} else if vs.views[0].Primary == "" && vs.views[0].Backup != "" {
-			latest := vs.views[0]
-			vs.views = append([]View{{incViewnum, latest.Backup, args.Me}}, vs.views...)	
-			// 2.4 set Backup
-		} else if vs.views[0].Backup == "" {
-			latest := vs.views[0]
-			vs.views = append([]View{{incViewnum, latest.Primary, args.Me}}, vs.views...)
-		}
-	}
-	fmt.Printf("ping %s %d (%s %s %d)\n", args.Me, args.Viewnum, vs.views[0].Primary, vs.views[0].Backup, vs.views[0].Viewnum)
-	// note: len(views) should be larger than 0
-	// assert.NotEqual(len(vs.views), 0)
-	// 3.  delete all viewnum < args.viewnum if the ping is from Primary
-	if vs.views[0].Primary == args.Me {
-		for vs.views[len(vs.views)-1].Viewnum < args.Viewnum {
-			vs.views = vs.views[:len(vs.views)-1]
-		}
-	}
-	// 4.   set reply.View = View[-1]
-	reply.View = vs.views[len(vs.views)-1]
-	// fmt.Printf("Current servers\n");
-	// for k,v := range vs.servers {
-	// 	fmt.Printf("\t%s : %d\n", k, v)
-	// }
+
+	// 5. set reply
+	reply.View = vs.view
+	// fmt.Printf("ping %s %d P[%s]B[%s]n[%d]\n", args.Me, args.Viewnum, vs.view.Primary, vs.view.Backup, vs.view.Viewnum)
 	return nil
 }
 
@@ -95,9 +98,7 @@ func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 	// Your code here.
 	// 1. set reply.View
 	vs.mu.Lock()
-	if len(vs.views) > 0 {
-		reply.View = vs.views[0]
-	}
+	reply.View = vs.view
 	vs.mu.Unlock()
 	return nil
 }
@@ -114,7 +115,7 @@ func (vs *ViewServer) tick() {
 	vs.mu.Lock()
 	for k, v := range vs.servers {
 		if time.Since(v) > DeadPings * PingInterval {
-			fmt.Printf("delete %s %d %d\n", k, time.Since(v), DeadPings * PingInterval)
+			// fmt.Printf("delete %s %d %d\n", k, time.Since(v), DeadPings * PingInterval)
 			delete(vs.servers, k)
 		}
 	}
@@ -148,6 +149,9 @@ func StartServer(me string) *ViewServer {
 	vs.me = me
 	// Your vs.* initializations here.
 	vs.servers = make(map[string]time.Time)
+	vs.confirmed = true
+	vs.view = View{Primary:"", Backup:"", Viewnum:0}
+	
 	// tell net/rpc about our RPC server and handlers.
 	rpcs := rpc.NewServer()
 	rpcs.Register(vs)
