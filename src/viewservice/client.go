@@ -73,6 +73,7 @@ func (ck *Clerk) Get() (View, bool) {
 	args := &GetArgs{}
 	var reply GetReply
 	ok := call(ck.server, "ViewServer.Get", args, &reply)
+	// fmt.Printf("[ViewService.Clerk.Get] %s %s %d %v\n", reply.View.Primary, reply.View.Backup, reply.View.Viewnum, ok)
 	if ok == false {
 		return View{}, false
 	}

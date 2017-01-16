@@ -69,12 +69,15 @@ func call(srv string, rpcname string,
 }
 
 func (ck *Clerk) getServer() string {
-	if ck.server == "" {
+	for ck.server == "" {
 		var view viewservice.View
-		for ok:=false; !ok; view,ok = ck.vs.Get(){}
+		for ok:=false; !ok; view,ok = ck.vs.Get(){
+			
+		}
 		ck.server = view.Primary
 		// TODO: Does ck need to store Viewnum?
 	}
+	// fmt.Printf("[PBClient.getServer] %s\n", ck.server)
 	return ck.server
 }
 //
@@ -87,7 +90,7 @@ func (ck *Clerk) getServer() string {
 func (ck *Clerk) Get(key string) string {
 
 	// Your code here.
-	args := GetArgs{Key:key, msgnum:nrand()}
+	args := GetArgs{Key:key, Msgnum:nrand()}
 	var reply GetReply
 	ok := false
 	for !ok {
@@ -98,6 +101,9 @@ func (ck *Clerk) Get(key string) string {
 				ck.server = ""
 				ok = false
 			}
+		} else {
+			ck.server = ""
+			ok = false
 		}
 	}
 	return reply.Value
@@ -110,7 +116,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	// Your code here.
 	// TODO: nrand is ok?
-	args := PutAppendArgs{Key:key, Value:value, Op:op, msgnum:nrand()}
+	args := PutAppendArgs{Key:key, Value:value, Op:op, Msgnum:nrand()}
 	var reply PutAppendReply
 	ok := false
 	for !ok {
@@ -120,6 +126,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				ck.server = ""
 				ok = false
 			}
+		} else {
+			ck.server = ""
+			ok = false
 		}
 	}
 }
