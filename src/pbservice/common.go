@@ -13,7 +13,8 @@ type PutAppendArgs struct {
 	Key   string
 	Value string
 	// You'll have to add definitions here.
-
+	Op    string
+	msgnum   int64
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 }
@@ -25,6 +26,7 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	msgnum   int64
 }
 
 type GetReply struct {
@@ -32,5 +34,12 @@ type GetReply struct {
 	Value string
 }
 
-
 // Your RPC definitions here.
+type DumpDBArgs struct {
+	Me       string
+	Viewnum  int
+}
+
+type DumpDBReply struct {
+	kv       map[string]string
+}

@@ -11,6 +11,10 @@ import "math/big"
 type Clerk struct {
 	vs *viewservice.Clerk
 	// Your declarations here
+	
+	// Clerk ONLY emit one operation one time
+	// xid: clerk.me + msgnum
+	server string
 }
 
 // this may come in handy.
@@ -25,7 +29,7 @@ func MakeClerk(vshost string, me string) *Clerk {
 	ck := new(Clerk)
 	ck.vs = viewservice.MakeClerk(me, vshost)
 	// Your ck.* initializations here
-
+	ck.server = ""
 	return ck
 }
 
@@ -64,6 +68,15 @@ func call(srv string, rpcname string,
 	return false
 }
 
+func (ck *Clerk) getServer() string {
+	if ck.server == "" {
+		var view viewservice.View
+		for ok:=false; !ok; view,ok = ck.vs.Get(){}
+		ck.server = view.Primary
+		// TODO: Does ck need to store Viewnum?
+	}
+	return ck.server
+}
 //
 // fetch a key's value from the current primary;
 // if they key has never been set, return "".
@@ -74,8 +87,20 @@ func call(srv string, rpcname string,
 func (ck *Clerk) Get(key string) string {
 
 	// Your code here.
-
-	return "???"
+	args := GetArgs{Key:key, msgnum:nrand()}
+	var reply GetReply
+	ok := false
+	for !ok {
+		ok = call(ck.getServer(), "PBServer.Get", args, &reply)
+		if ok {
+			// TODO: handle ErrNoKey error
+			if reply.Err == ErrWrongServer {
+				ck.server = ""
+				ok = false
+			}
+		}
+	}
+	return reply.Value
 }
 
 //
@@ -84,6 +109,19 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	// Your code here.
+	// TODO: nrand is ok?
+	args := PutAppendArgs{Key:key, Value:value, Op:op, msgnum:nrand()}
+	var reply PutAppendReply
+	ok := false
+	for !ok {
+		ok = call(ck.getServer(), "PBServer.PutAppend", args, &reply)
+		if ok {
+			if reply.Err == ErrWrongServer {
+				ck.server = ""
+				ok = false
+			}
+		}
+	}
 }
 
 //
