@@ -15,6 +15,7 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	Op    string
 	Msgnum   int64
+	Viewnum  uint
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 }
@@ -27,6 +28,7 @@ type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
 	Msgnum   int64
+	Viewnum  uint
 }
 
 type GetReply struct {

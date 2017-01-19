@@ -23,27 +23,37 @@ type PBServer struct {
 	vs         *viewservice.Clerk
 	// Your declarations here.
 
-	//pendingbuf map[int64]string // NOTE: it seems no pending msg, just return immidiately
+	// [MUTEX]
 	msgbuf     map[int64]string   // buffer results
-	// If Backup update first, it will get DB from Primary with lock of server
-	// If Primary update first, it will update DB first. So in every ease, it is fine to dump DB, than use it directly.
-	view       viewservice.View   // [mutex] current view
-	isUpdate   bool               // if export DB to Backup
-	kv         map[string]string  // [mutex] key-value DB
+	view       viewservice.View   // current view
+	kv         map[string]string  // key-value DB
+	backupUpdate bool
 }
 
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 
 	// Your code here.
+	// fmt.Printf("[Get] in\n")
 	pb.mu.Lock()
-	for i := 0; i < 1; i++ {
-		if !pb.isPrimary() {
+	for i:=0;i< 1;i++ {
+		if args.Viewnum != pb.view.Viewnum ||
+			(!pb.isPrimary() && !pb.isBackup()) ||
+			(pb.view.Backup != "" && !pb.backupUpdate){
+			// fmt.Printf("[Get] %d %s %s %d\n", args.Viewnum, pb.view.Primary, pb.view.Backup, pb.view.Viewnum)
 			reply.Err = ErrWrongServer
 			break
 		}
-		
-		// critical region
+
+		ok := true
+		if pb.isPrimary() && pb.view.Backup != "" && pb.backupUpdate {
+			ok = call(pb.view.Backup, "PBServer.Get", args, reply)
+			if !ok || reply.Err == ErrWrongServer {
+				// fmt.Printf("[PBServer.Get] (%s,%s,%d) Backup error\n", pb.view.Primary, pb.view.Backup, pb.view.Viewnum)
+				reply.Err = ErrWrongServer
+				break
+			}
+		}
 		v,ok := pb.kv[args.Key]
 		
 		if ok {
@@ -52,6 +62,7 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 		} else {
 			reply.Err = ErrNoKey
 		}
+		break
 	}
 	pb.mu.Unlock()
 	// fmt.Printf("[PBServer.Get:%s] (%s:%s:%s)\n", pb.me, args.Key, reply.Value, reply.Err)
@@ -64,24 +75,28 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 
 	// Your code here.
 	pb.mu.Lock()
-	if !pb.isPrimary() && !pb.isBackup() {
-		reply.Err = ErrWrongServer
-		return nil
-	}
-
-	reply.Err = OK
-	// critical region
-	ok := true
-	for {
-		// repeat message
-		if _,ok:=pb.msgbuf[args.Msgnum]; ok {
-			// fmt.Printf("PutAppend repeat %s %s %s %d %s\n", args.Op, args.Key, args.Value, args.Msgnum, reply.Err)
+	for i:=0;i< 1;i++ {
+		if args.Viewnum != pb.view.Viewnum ||             // old view
+		   (!pb.isPrimary() && !pb.isBackup()) ||         // not primary or backup
+		   (pb.view.Backup != "" && !pb.backupUpdate) {// backup not ready
+			// fmt.Printf("[PutAppend] wrong server %d %s %s %d\n", args.Viewnum, pb.view.Primary, pb.view.Backup, pb.view.Viewnum)
+			reply.Err = ErrWrongServer
 			break
 		}
 		
-		if pb.isPrimary() && pb.view.Backup != "" && pb.isUpdate == true {
+		reply.Err = OK
+
+		// repeat message
+		if _,ok:=pb.msgbuf[args.Msgnum]; ok {
+			// fmt.Printf("[PutAppend] repeat %s %s %s %d %s\n", args.Op, args.Key, args.Value, args.Msgnum, reply.Err)
+			break
+		}
+
+		ok := true
+		if pb.isPrimary() && pb.view.Backup != "" && pb.backupUpdate {
 			ok = call(pb.view.Backup, "PBServer.PutAppend", args, reply)
 		}
+		
 		// fmt.Printf("[PutAppend] %v %v\n", ok, reply.Err)
 		if ok && reply.Err != ErrWrongServer {
 			if _,ok = pb.kv[args.Key]; ok && args.Op == "Append" {
@@ -93,18 +108,17 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 			}
 			break
 		} else {
-			// update view
-			if newView, err := pb.vs.Ping(pb.view.Viewnum); err == nil {
-				if pb.view.Primary != newView.Primary {
-					pb.isUpdate = false
-				}
-				pb.view = newView
-			}
-			// fmt.Printf("[PutAppend] update view %s %s %d\n", pb.view.Primary, pb.view.Backup, pb.view.Viewnum)
+			reply.Err = ErrWrongServer
+			break
 		}
 	}
 	pb.mu.Unlock()
-	
+	// fmt.Printf("[PutAppend] %s %d (%s,%s,%d,%v) reply.Err %s (%s,%s)\n",
+	//	pb.me, args.Viewnum,
+	//	pb.view.Primary, pb.view.Backup, pb.view.Viewnum, pb.backupUpdate,
+	//	reply.Err,
+	//	args.Key, args.Value,
+	//)
 	return nil
 }
 
@@ -120,30 +134,30 @@ func (pb *PBServer) ExportDB(args *ExportDBArgs, reply *ExportDBReply) error {
 	for k,v:= range pb.msgbuf {
 		reply.Msgbuf[k] = v
 	}
+	pb.backupUpdate = true
 	pb.mu.Unlock()
-	pb.isUpdate = true
+	// fmt.Printf("ExportDB \n");
 	return nil
 }
 
 func (pb *PBServer) tryImportDB() {
-	if pb.isUpdate {
+	if pb.backupUpdate {
 		return
 	}
 	args := ExportDBArgs{Me:pb.me, Viewnum:pb.view.Viewnum}
 	var reply ExportDBReply
-	ok := false
-	for !ok {
-		ok = call(pb.view.Primary, "PBServer.ExportDB", args, &reply)
+	ok := call(pb.view.Primary, "PBServer.ExportDB", args, &reply)
+	if ok {
+		for k,v:= range reply.Kv {
+			pb.kv[k] = v
+		}
+		for k,v:= range reply.Msgbuf {
+			pb.msgbuf[k] = v
+		}
+		pb.backupUpdate = true
+	} else {
+		// fmt.Printf("ImportDB fail %v %v\n", pb.view.Primary, ok);
 	}
-	pb.mu.Lock()
-	for k,v:= range reply.Kv {
-		pb.kv[k] = v
-	}
-	for k,v:= range reply.Msgbuf {
-		pb.msgbuf[k] = v
-	}
-	pb.mu.Unlock()
-	pb.isUpdate = true
 }
 
 // TODO: Could Primary server know primary change in time?
@@ -163,24 +177,29 @@ func (pb *PBServer) isBackup() bool {
 func (pb *PBServer) tick() {
 
 	// Your code here.
+	pb.mu.Lock()
 	// if isdead, dont ping Viewserver
 	if pb.isdead() {
 		pb.kv = make(map[string]string)
 		pb.msgbuf = make(map[int64]string)
-		return
-	}
-	// update view
-	if newView, err := pb.vs.Ping(pb.view.Viewnum); err == nil {
-		if pb.view.Primary != newView.Primary {
-			pb.isUpdate = false
+		pb.backupUpdate = false
+		pb.view = viewservice.View{Primary:"", Backup:"", Viewnum:0}
+	} else {
+		if pb.isBackup() && pb.backupUpdate == false {
+			pb.tryImportDB()
+		} else {
+			newView, err := pb.vs.Ping(pb.view.Viewnum)
+			if err == nil && pb.view.Viewnum != newView.Viewnum {
+				pb.view = newView
+				if pb.isBackup() {
+					pb.tryImportDB()
+				}
+			}
 		}
-		pb.view = newView
 	}
-	// fmt.Printf("[tick]%s %s %d\n", pb.view.Primary, pb.view.Backup, pb.view.Viewnum)
-	// Backup server need to tell Primary server if B need database information
-	if pb.isBackup() {
-		pb.tryImportDB()
-	}
+
+	pb.mu.Unlock()
+	// fmt.Printf("[tick]%s %s %s %d\n", pb.me, pb.view.Primary, pb.view.Backup, pb.view.Viewnum)
 }
 
 // tell the server to shut itself down.
@@ -217,7 +236,7 @@ func StartServer(vshost string, me string) *PBServer {
 	pb.view = viewservice.View{Primary:"", Backup:"", Viewnum:0}
 	pb.kv = make(map[string]string)
 	pb.msgbuf = make(map[int64]string)
-	pb.isUpdate = false
+	pb.backupUpdate = false
 	
 	rpcs := rpc.NewServer()
 	rpcs.Register(pb)

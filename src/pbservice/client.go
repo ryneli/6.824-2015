@@ -14,7 +14,8 @@ type Clerk struct {
 	
 	// Clerk ONLY emit one operation one time
 	// xid: clerk.me + msgnum
-	server string
+	server  string
+	viewnum uint
 }
 
 // this may come in handy.
@@ -30,6 +31,7 @@ func MakeClerk(vshost string, me string) *Clerk {
 	ck.vs = viewservice.MakeClerk(me, vshost)
 	// Your ck.* initializations here
 	ck.server = ""
+	ck.viewnum = 0
 	return ck
 }
 
@@ -75,9 +77,10 @@ func (ck *Clerk) getServer() string {
 			
 		}
 		ck.server = view.Primary
+		ck.viewnum = view.Viewnum
 		// TODO: Does ck need to store Viewnum?
 	}
-	// fmt.Printf("[PBClient.getServer] %s\n", ck.server)
+	// fmt.Printf("[PBClient.getServer] %s %d\n", ck.server, ck.viewnum)
 	return ck.server
 }
 //
@@ -90,11 +93,13 @@ func (ck *Clerk) getServer() string {
 func (ck *Clerk) Get(key string) string {
 
 	// Your code here.
-	args := GetArgs{Key:key, Msgnum:nrand()}
+	args := GetArgs{Key:key, Msgnum:nrand(), Viewnum:ck.viewnum}
 	var reply GetReply
 	ok := false
 	for !ok {
+		args.Viewnum = ck.viewnum
 		ok = call(ck.getServer(), "PBServer.Get", args, &reply)
+		// fmt.Printf("[Clerk.Get] %s %d\n", ck.server, ck.viewnum)
 		if ok {
 			// TODO: handle ErrNoKey error
 			if reply.Err == ErrWrongServer {
@@ -116,11 +121,13 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	// Your code here.
 	// TODO: nrand is ok?
-	args := PutAppendArgs{Key:key, Value:value, Op:op, Msgnum:nrand()}
+	args := PutAppendArgs{Key:key, Value:value, Op:op, Msgnum:nrand(), Viewnum:ck.viewnum}
 	var reply PutAppendReply
 	ok := false
 	for !ok {
+		args.Viewnum = ck.viewnum
 		ok = call(ck.getServer(), "PBServer.PutAppend", args, &reply)
+		// fmt.Printf("[Clerk.PutAppend] %s %d\n", ck.server, ck.viewnum)
 		if ok {
 			if reply.Err == ErrWrongServer {
 				ck.server = ""
